@@ -1,0 +1,575 @@
+<html>
+<head>
+    <title>Interactive Shader with Cloth Physics Simulation</title>
+    <style>
+        body, html {
+            margin: 0;
+            overflow: hidden;
+            height: 100%;
+            width: 100%;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #fff;
+            font-family: Arial, sans-serif;
+            background-color: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        button, select, input[type=range] {
+            margin: 5px 0;
+            width: 100%;
+        }
+        label {
+            display: block;
+            font-size: 14px;
+        }
+        #debug {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: #fff;
+            font-family: monospace;
+            background-color: rgba(0,0,0,0.5);
+            padding: 5px;
+            border-radius: 5px;
+            white-space: pre-line;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="glCanvas"></canvas>
+    <div id="controls">
+        <button id="resetButton">Reset Simulation</button>
+        <label>Wind Strength: <input type="range" id="windSlider" min="-1" max="1" step="0.01" value="0"></label>
+        <label>Gravity: <input type="range" id="gravitySlider" min="0" max="2" step="0.01" value="0.5"></label>
+        <label>Cloth Tension: <input type="range" id="tensionSlider" min="0" max="1" step="0.01" value="0.5"></label>
+        <label>Simulation Speed: <input type="range" id="speedSlider" min="0.1" max="2" step="0.1" value="1"></label>
+        <label>Pattern Scale: <input type="range" id="patternScaleSlider" min="1" max="20" step="0.1" value="10"></label>
+        <label>Color Speed: <input type="range" id="colorSpeedSlider" min="0.1" max="5" step="0.1" value="1"></label>
+        <label>Chaos: <input type="range" id="chaosSlider" min="0" max="1" step="0.01" value="0.5"></label>
+        <label>Interactivity Strength: <input type="range" id="interactivitySlider" min="0" max="1" step="0.01" value="0.5"></label>
+        <label>Wind Direction: <input type="range" id="windDirectionSlider" min="0" max="360" step="1" value="0"></label>
+        <label>Rigidity: <input type="range" id="rigiditySlider" min="0" max="1" step="0.01" value="0.5"></label>
+        <button id="grabModeButton">Toggle Grab Mode</button>
+    </div>
+    <div id="debug"></div>
+    <script type="text/javascript">
+        const canvas = document.getElementById('glCanvas');
+        const gl = canvas.getContext('webgl');
+        if (!gl) {
+            alert('WebGL not supported in this browser.');
+        }
+
+        const clothCanvas = document.createElement('canvas');
+        const clothCtx = clothCanvas.getContext('2d');
+
+        function resizeCanvas() {
+            const ratio = window.devicePixelRatio || 1;
+            canvas.width = window.innerWidth * ratio;
+            canvas.height = window.innerHeight * ratio;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            clothCanvas.width = window.innerWidth * ratio;
+            clothCanvas.height = window.innerHeight * ratio;
+            canvas.style.width = window.innerWidth + 'px';
+            canvas.style.height = window.innerHeight + 'px';
+            clothCanvas.style.width = window.innerWidth + 'px';
+            clothCanvas.style.height = window.innerHeight + 'px';
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        const vertShaderSrc = `
+            attribute vec2 a_position;
+            varying vec2 v_uv;
+            varying vec3 v_normal;
+            void main() {
+                v_uv = a_position * 0.5 + 0.5;
+                v_normal = vec3(0.0, 0.0, 1.0);
+                gl_Position = vec4(a_position, 0.0, 1.0);
+            }
+        `;
+
+        const fragShaderSrc = `
+            precision mediump float;
+            uniform float u_time;
+            uniform float u_patternScale;
+            uniform float u_colorSpeed;
+            uniform vec2 u_resolution;
+            varying vec2 v_uv;
+            uniform sampler2D u_clothTexture;
+
+            float noise(vec2 st) {
+                vec2 i = floor(st);
+                vec2 f = fract(st);
+                float a = dot(i, vec2(12.9898, 78.233));
+                float b = dot(i + vec2(1.0, 0.0), vec2(12.9898, 78.233));
+                float c = dot(i + vec2(0.0, 1.0), vec2(12.9898, 78.233));
+                float d = dot(i + vec2(1.0, 1.0), vec2(12.9898, 78.233));
+                float n = mix(mix(sin(a) * 43758.5453, sin(b) * 43758.5453, f.x),
+                              mix(sin(c) * 43758.5453, sin(d) * 43758.5453, f.x), f.y);
+                return fract(n);
+            }
+
+            float fbm(vec2 st) {
+                float value = 0.0;
+                float amplitude = 0.5;
+                float frequency = 1.0;
+                for (int i = 0; i < 5; i++) {
+                    value += amplitude * noise(st * frequency);
+                    frequency *= 2.0;
+                    amplitude *= 0.5;
+                }
+                return value;
+            }
+
+            void main() {
+                vec2 uv = v_uv;
+                vec3 clothColor = texture2D(u_clothTexture, uv).rgb;
+                float pattern = fbm(uv * u_patternScale + u_time * 0.1);
+                float colorFactor = sin(u_time * u_colorSpeed + uv.x * 10.0) * 0.5 + 0.5;
+                float lighting = dot(normalize(vec3(0.0, 0.0, 1.0)), normalize(vec3(uv - 0.5, 1.0)));
+                
+                float wither = sin(u_time * 0.5 + uv.y * 20.0) * 0.1;
+                float wander = cos(u_time * 0.2 + uv.x * 15.0) * 0.1;
+                float slither = sin(u_time * 2.0 + (uv.x + uv.y) * 30.0) * 0.05;
+                
+                vec3 finalColor = clothColor * vec3(colorFactor + pattern) * (lighting * 0.5 + 0.5);
+                finalColor += vec3(pattern * 0.2, pattern * 0.1, pattern * 0.3);
+                finalColor += vec3(wither, wander, slither);
+                finalColor = max(finalColor, vec3(0.1));
+                gl_FragColor = vec4(finalColor, 1.0);
+            }
+        `;
+
+        function compileShader(gl, shaderSource, shaderType) {
+            const shader = gl.createShader(shaderType);
+            gl.shaderSource(shader, shaderSource);
+            gl.compileShader(shader);
+            const success = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
+            if (!success) {
+                console.error('Shader compile failed with: ' + gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(gl, vertexShader, fragmentShader) {
+            const program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+            const success = gl.getProgramParameter(program, gl.LINK_STATUS);
+            if (!success) {
+                console.error('Program failed to link: ' + gl.getProgramInfoLog(program));
+                return null;
+            }
+            return program;
+        }
+
+        const vertexShader = compileShader(gl, vertShaderSrc, gl.VERTEX_SHADER);
+        const fragmentShader = compileShader(gl, fragShaderSrc, gl.FRAGMENT_SHADER);
+        const shaderProgram = createProgram(gl, vertexShader, fragmentShader);
+
+        gl.useProgram(shaderProgram);
+
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        const vertices = new Float32Array([
+            -1, -1,
+             1, -1,
+            -1,  1,
+             1,  1,
+        ]);
+        gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+        const positionLoc = gl.getAttribLocation(shaderProgram, 'a_position');
+        gl.enableVertexAttribArray(positionLoc);
+        gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+
+        const timeLoc = gl.getUniformLocation(shaderProgram, 'u_time');
+        const resolutionLoc = gl.getUniformLocation(shaderProgram, 'u_resolution');
+        const clothTextureLoc = gl.getUniformLocation(shaderProgram, 'u_clothTexture');
+        const patternScaleLoc = gl.getUniformLocation(shaderProgram, 'u_patternScale');
+        const colorSpeedLoc = gl.getUniformLocation(shaderProgram, 'u_colorSpeed');
+
+        let points = [];
+        let sticks = [];
+        let gravity = 0.5;
+        let wind = 0;
+        let tension = 0.5;
+        let simSpeed = 1;
+        const friction = 0.99;
+        const bounce = 0.9;
+        let chaosStrength = 0.5;
+        let interactivityStrength = 0.5;
+        let windDirection = 0;
+        let rigidity = 0.5;
+        let grabMode = false;
+        let grabbedPoint = null;
+
+        let isMouseDown = false;
+        const mouse = { x: 0, y: 0 };
+        const influenceRadius = 50;
+
+        document.getElementById('interactivitySlider').addEventListener('input', function() {
+            interactivityStrength = parseFloat(this.value);
+        });
+
+        document.getElementById('windDirectionSlider').addEventListener('input', function() {
+            windDirection = parseFloat(this.value);
+        });
+
+        document.getElementById('rigiditySlider').addEventListener('input', function() {
+            rigidity = parseFloat(this.value);
+        });
+
+        document.getElementById('grabModeButton').addEventListener('click', function() {
+            grabMode = !grabMode;
+            this.textContent = grabMode ? 'Disable Grab Mode' : 'Enable Grab Mode';
+        });
+
+        function handleMouseDown(e) {
+            if (grabMode) {
+                const rect = canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                grabbedPoint = findNearestPoint(x, y);
+            } else {
+                isMouseDown = true;
+            }
+            mouse.x = e.clientX;
+            mouse.y = e.clientY;
+        }
+
+        function handleMouseMove(e) {
+            if (grabMode && grabbedPoint) {
+                const rect = canvas.getBoundingClientRect();
+                grabbedPoint.x = e.clientX - rect.left;
+                grabbedPoint.y = e.clientY - rect.top;
+            } else if (isMouseDown) {
+                mouse.x = e.clientX;
+                mouse.y = e.clientY;
+            }
+        }
+
+        function handleMouseUp() {
+            isMouseDown = false;
+            grabbedPoint = null;
+        }
+
+        function handleTouchStart(e) {
+            e.preventDefault();
+            const touch = e.touches[0];
+            if (grabMode) {
+                const rect = canvas.getBoundingClientRect();
+                const x = touch.clientX - rect.left;
+                const y = touch.clientY - rect.top;
+                grabbedPoint = findNearestPoint(x, y);
+            } else {
+                isMouseDown = true;
+            }
+            mouse.x = touch.clientX;
+            mouse.y = touch.clientY;
+        }
+
+        function handleTouchMove(e) {
+            e.preventDefault();
+            const touch = e.touches[0];
+            if (grabMode && grabbedPoint) {
+                const rect = canvas.getBoundingClientRect();
+                grabbedPoint.x = touch.clientX - rect.left;
+                grabbedPoint.y = touch.clientY - rect.top;
+            } else if (isMouseDown) {
+                mouse.x = touch.clientX;
+                mouse.y = touch.clientY;
+            }
+        }
+
+        function handleTouchEnd() {
+            isMouseDown = false;
+            grabbedPoint = null;
+        }
+
+        function findNearestPoint(x, y) {
+            let nearestPoint = null;
+            let minDistance = Infinity;
+            points.forEach(p => {
+                const dx = p.x - x;
+                const dy = p.y - y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                if (distance < minDistance && !p.pinned) {
+                    minDistance = distance;
+                    nearestPoint = p;
+                }
+            });
+            return nearestPoint;
+        }
+
+        canvas.addEventListener('mousedown', handleMouseDown);
+        canvas.addEventListener('mousemove', handleMouseMove);
+        canvas.addEventListener('mouseup', handleMouseUp);
+        canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+        canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+        canvas.addEventListener('touchend', handleTouchEnd);
+
+        function createDemonmind() {
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            const radius = Math.min(canvas.width, canvas.height) * 0.4;
+            const points = [];
+            const numPoints = 5;
+
+            for (let i = 0; i < numPoints * 2; i++) {
+                const angle = (i * Math.PI * 4) / (numPoints * 2);
+                const r = i % 2 === 0 ? radius : radius * 0.5;
+                const x = centerX + r * Math.cos(angle);
+                const y = centerY + r * Math.sin(angle);
+                points.push({ x, y });
+            }
+
+            return points;
+        }
+
+        const demonmindPoints = createDemonmind();
+
+        function distToSegment(p, v, w) {
+            const l2 = Math.pow(w.x - v.x, 2) + Math.pow(w.y - v.y, 2);
+            if (l2 === 0) return Math.sqrt(Math.pow(p.x - v.x, 2) + Math.pow(p.y - v.y, 2));
+            let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+            t = Math.max(0, Math.min(1, t));
+            return Math.sqrt(
+                Math.pow(p.x - (v.x + t * (w.x - v.x)), 2) +
+                Math.pow(p.y - (v.y + t * (w.y - v.y)), 2)
+            );
+        }
+
+        function createCloth() {
+            points = [];
+            sticks = [];
+            const spacing = 10;
+            const numRows = 80;
+            const numCols = 100;
+
+            for (let y = 0; y <= numRows; y++) {
+                for (let x = 0; x <= numCols; x++) {
+                    const u = x / numCols;
+                    const v = y / numRows;
+                    const px = canvas.width * u;
+                    const py = canvas.height * v;
+                    const point = {
+                        x: px,
+                        y: py,
+                        px: px,
+                        py: py,
+                        pinned: false,
+                    };
+
+                    for (let i = 0; i < demonmindPoints.length; i++) {
+                        const dp = demonmindPoints[i];
+                        const nextDp = demonmindPoints[(i + 1) % demonmindPoints.length];
+                        if (distToSegment(point, dp, nextDp) < 5) {
+                            point.pinned = true;
+                            point.x = dp.x + (nextDp.x - dp.x) * u;
+                            point.y = dp.y + (nextDp.y - dp.y) * v;
+                            point.px = point.x;
+                            point.py = point.y;
+                            break;
+                        }
+                    }
+
+                    points.push(point);
+
+                    if (x > 0) {
+                        sticks.push({
+                            p0: points[points.length - 2],
+                            p1: point,
+                            length: spacing,
+                        });
+                    }
+
+                    if (y > 0) {
+                        sticks.push({
+                            p0: points[(y - 1) * (numCols + 1) + x],
+                            p1: point,
+                            length: spacing,
+                        });
+                    }
+                }
+            }
+        }
+
+        createCloth();
+
+        function applyWitheringEffect(point, time) {
+            const witherFrequency = 0.5;
+            const witherAmplitude = 5;
+            point.x += Math.sin(time * witherFrequency + point.y * 0.1) * witherAmplitude;
+            point.y += Math.cos(time * witherFrequency + point.x * 0.1) * witherAmplitude;
+        }
+
+        function applyWanderingEffect(point, time) {
+            const wanderFrequency = 0.2;
+            const wanderAmplitude = 10;
+            point.x += Math.sin(time * wanderFrequency + point.y * 0.05) * wanderAmplitude;
+            point.y += Math.cos(time * wanderFrequency + point.x * 0.05) * wanderAmplitude;
+        }
+
+        function simulateCloth(deltaTime, time) {
+            deltaTime *= simSpeed;
+            const windAngle = windDirection * Math.PI / 180;
+            const windForceX = Math.cos(windAngle) * wind;
+            const windForceY = Math.sin(windAngle) * wind;
+            const chaosForce = Math.cos(Date.now() * 0.002) * chaosStrength;
+
+            points.forEach(p => {
+                if (!p.pinned && p !== grabbedPoint) {
+                    const vx = (p.x - p.px) * friction;
+                    const vy = (p.y - p.py) * friction;
+
+                    p.px = p.x;
+                    p.py = p.y;
+                    p.x += vx + windForceX * deltaTime + chaosForce * Math.sin(p.y * 0.1);
+                    p.y += vy + (windForceY + gravity) * deltaTime + chaosForce * Math.cos(p.x * 0.1);
+
+                    if (isMouseDown) {
+                        const dx = p.x - mouse.x;
+                        const dy = p.y - mouse.y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist < influenceRadius) {
+                            const pullX = (dx / dist) * (influenceRadius - dist);
+                            const pullY = (dy / dist) * (influenceRadius - dist);
+                            p.x += pullX * interactivityStrength * 0.1;
+                            p.y += pullY * interactivityStrength * 0.1;
+                        }
+                    }
+
+                    if (p.x < 0) {
+                        p.x = 0;
+                        p.px = p.x + vx * bounce;
+                    } else if (p.x > clothCanvas.width) {
+                        p.x = clothCanvas.width;
+                        p.px = p.x + vx * bounce;
+                    }
+                    if (p.y > clothCanvas.height) {
+                        p.y = clothCanvas.height;
+                        p.py = p.y + vy * bounce;
+                    }
+
+                    applyWitheringEffect(p, time);
+                    applyWanderingEffect(p, time);
+                    
+                    const slitherFrequency = 2;
+                    const slitherAmplitude = 5;
+                    p.x += Math.sin(time * slitherFrequency + p.y * 0.1) * slitherAmplitude * deltaTime;
+                    p.y += Math.cos(time * slitherFrequency + p.x * 0.1) * slitherAmplitude * deltaTime;
+                }
+            });
+
+            const iterations = Math.floor(20 * rigidity);
+            for (let i = 0; i < iterations; i++) {
+                sticks.forEach(s => {
+                    const dx = s.p1.x - s.p0.x;
+                    const dy = s.p1.y - s.p0.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    const difference = s.length - distance;
+                    const percent = difference / distance * tension * 0.5;
+                    const offsetX = dx * percent;
+                    const offsetY = dy * percent;
+
+                    if (!s.p0.pinned && s.p0 !== grabbedPoint) {
+                        s.p0.x -= offsetX;
+                        s.p0.y -= offsetY;
+                    }
+                    if (!s.p1.pinned && s.p1 !== grabbedPoint) {
+                        s.p1.x += offsetX;
+                        s.p1.y += offsetY;
+                    }
+                });
+            }
+
+            clothCtx.clearRect(0, 0, clothCanvas.width, clothCanvas.height);
+
+            clothCtx.beginPath();
+            clothCtx.moveTo(demonmindPoints[0].x, demonmindPoints[0].y);
+            for (let i = 1; i < demonmindPoints.length; i++) {
+                clothCtx.lineTo(demonmindPoints[i].x, demonmindPoints[i].y);
+            }
+            clothCtx.closePath();
+            clothCtx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+            clothCtx.lineWidth = 4;
+            clothCtx.stroke();
+
+            const gradient = clothCtx.createLinearGradient(0, 0, clothCanvas.width, clothCanvas.height);
+            gradient.addColorStop(0, `hsl(${(Date.now() * 0.05) % 360}, 70%, 60%)`);
+            gradient.addColorStop(1, `hsl(${(Date.now() * 0.05 + 180) % 360}, 70%, 60%)`);
+            clothCtx.strokeStyle = gradient;
+            clothCtx.lineWidth = 2;
+            clothCtx.beginPath();
+            sticks.forEach(s => {
+                clothCtx.moveTo(s.p0.x, s.p0.y);
+                clothCtx.lineTo(s.p1.x, s.p1.y);
+            });
+            clothCtx.stroke();
+        }
+
+        const clothTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, clothTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+
+        let startTime = null;
+        let lastTime = null;
+
+        function render(time) {
+            if (!startTime) {
+                startTime = time;
+                lastTime = time;
+            }
+            const deltaTime = (time - lastTime) * 0.001;
+            lastTime = time;
+
+            simulateCloth(deltaTime, time * 0.001);
+
+            gl.bindTexture(gl.TEXTURE_2D, clothTexture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, clothCanvas);
+
+            gl.uniform1f(timeLoc, time * 0.001);
+            gl.uniform2f(resolutionLoc, canvas.width, canvas.height);
+            gl.uniform1f(patternScaleLoc, parseFloat(document.getElementById('patternScaleSlider').value));
+            gl.uniform1f(colorSpeedLoc, parseFloat(document.getElementById('colorSpeedSlider').value));
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, clothTexture);
+            gl.uniform1i(clothTextureLoc, 0);
+
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+            const error = gl.getError();
+            if (error !== gl.NO_ERROR) {
+                console.error('WebGL error:', error);
+            }
+
+            requestAnimationFrame(render);
+        }
+
+        document.getElementById('windSlider').addEventListener('input', function() {
+            wind = parseFloat(this.value);
+        });
+        document.getElementById('gravitySlider').addEventListener('input', function() {
+            gravity = parseFloat(this.value);
+        });
+
+        requestAnimationFrame(render);
+    </script>
+</body>
+</html>
